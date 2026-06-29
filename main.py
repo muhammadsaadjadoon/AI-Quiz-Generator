@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║   UoH AI Quiz Engine v6.0  —  Advanced ML Pipeline             ║
+║   UoH AI Quiz Engine v5.0  —  Advanced ML Pipeline             ║
 ║   University of Haripur  —  5th Semester Project               ║
 ║                                                                  ║
 ║   Muhammad Saad Jadoon · BS AI                                  ║
@@ -16,12 +16,10 @@
 ║   ✓ Wh-Question Generation (Who/What/When/Where/How)           ║
 ║   ✓ Fill-in-Blank MCQs     (proper keyphrase targeting)        ║
 ║   ✓ Distractor Engine      (semantic + WordNet distractors)    ║
-║   ✓ PDF Text Extraction    (PyMuPDF based)                     ║
-║   ✓ 3000 MCQ Training Data (Naive Bayes difficulty classifier) ║
 ╚══════════════════════════════════════════════════════════════════╝
 
 INSTALL DEPENDENCIES:
-    pip install fastapi uvicorn sqlalchemy werkzeug numpy pandas scikit-learn nltk pymupdf python-multipart
+    pip install fastapi uvicorn sqlalchemy werkzeug numpy pandas scikit-learn nltk
 
 FIRST RUN – download NLTK data (run once):
     python -c "import nltk; nltk.download('punkt'); nltk.download('stopwords'); nltk.download('wordnet'); nltk.download('averaged_perceptron_tagger'); nltk.download('maxent_ne_chunker'); nltk.download('words')"
@@ -33,12 +31,12 @@ import random
 import logging
 import json
 import string
-import io
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 from collections import Counter, defaultdict
 
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
+# ═══ Web Framework & DB ═══
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 
@@ -46,6 +44,7 @@ from sqlalchemy import create_engine, Column, Integer, String, Text, Float, Date
 from sqlalchemy.orm import sessionmaker, Session, declarative_base, relationship
 from werkzeug.security import generate_password_hash, check_password_hash
 
+# ═══ ML Libraries ═══
 import numpy as np
 import pandas as pd
 
@@ -56,6 +55,7 @@ from sklearn.preprocessing import normalize, LabelEncoder
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.pipeline import Pipeline
 
+# ═══ NLP ═══
 import nltk
 from nltk.tokenize import sent_tokenize, word_tokenize
 from nltk.corpus import stopwords, wordnet
@@ -63,12 +63,7 @@ from nltk.tag import pos_tag
 from nltk.chunk import ne_chunk
 from nltk.stem import WordNetLemmatizer
 
-try:
-    import fitz  # PyMuPDF
-    PDF_SUPPORT = True
-except ImportError:
-    PDF_SUPPORT = False
-
+# Auto-download required NLTK data
 for pkg in ['punkt', 'stopwords', 'wordnet', 'averaged_perceptron_tagger',
             'maxent_ne_chunker', 'words', 'omw-1.4', 'punkt_tab',
             'averaged_perceptron_tagger_eng']:
@@ -77,13 +72,19 @@ for pkg in ['punkt', 'stopwords', 'wordnet', 'averaged_perceptron_tagger',
     except Exception:
         pass
 
+# ════════════════════════════════════════════════════════════════
+# LOGGING
+# ════════════════════════════════════════════════════════════════
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
-logger = logging.getLogger("UOH_QUIZ_V6")
+logger = logging.getLogger("UOH_QUIZ_V5")
 
-DATABASE_URL = "sqlite:///./uoh_quiz_v6.db"
+# ════════════════════════════════════════════════════════════════
+# DATABASE
+# ════════════════════════════════════════════════════════════════
+DATABASE_URL = "sqlite:///./uoh_quiz_v5.db"
 engine_db = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(bind=engine_db, autocommit=False, autoflush=False)
 Base = declarative_base()
@@ -108,7 +109,6 @@ class QuizSession(Base):
     total_questions = Column(Integer)
     quiz_type = Column(String(20), default="standard")
     processing_time = Column(Float)
-    source_type = Column(String(20), default="text")
     ml_pipeline = Column(String(200), default="TF-IDF|Cosine|KMeans|NaiveBayes|NumPy|Pandas")
     created_at = Column(DateTime, default=datetime.utcnow)
     owner = relationship("User", back_populates="sessions")
@@ -131,6 +131,10 @@ class QuestionBank(Base):
 
 Base.metadata.create_all(bind=engine_db)
 
+
+# ════════════════════════════════════════════════════════════════
+# NLP UTILITIES
+# ════════════════════════════════════════════════════════════════
 STOP_WORDS = set(stopwords.words('english')) | {
     'also', 'however', 'therefore', 'moreover', 'furthermore',
     'thus', 'hence', 'consequently', 'meanwhile', 'nevertheless',
@@ -140,30 +144,8 @@ STOP_WORDS = set(stopwords.words('english')) | {
 lemmatizer = WordNetLemmatizer()
 
 
-def extract_text_from_pdf(pdf_bytes: bytes) -> str:
-    if not PDF_SUPPORT:
-        raise HTTPException(500, "PDF support not available. Install pymupdf: pip install pymupdf")
-    try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        full_text = []
-        for page_num in range(len(doc)):
-            page = doc.load_page(page_num)
-            text = page.get_text("text")
-            text = re.sub(r'\n{3,}', '\n\n', text)
-            text = re.sub(r'[ \t]+', ' ', text)
-            full_text.append(text.strip())
-        doc.close()
-        combined = "\n\n".join(full_text)
-        combined = re.sub(r'\n([a-z])', r' \1', combined)
-        combined = re.sub(r'-\n(\w)', r'\1', combined)
-        combined = re.sub(r'\n{2,}', '. ', combined)
-        combined = re.sub(r'\s+', ' ', combined)
-        return combined.strip()
-    except Exception as e:
-        raise HTTPException(500, f"PDF extraction failed: {str(e)}")
-
-
 def clean_text(text: str) -> str:
+    """Normalize whitespace and unicode artifacts."""
     text = re.sub(r'\s+', ' ', text)
     text = re.sub(r'["""]', '"', text)
     text = re.sub(r"[''']", "'", text)
@@ -171,6 +153,7 @@ def clean_text(text: str) -> str:
 
 
 def split_sentences(text: str) -> List[str]:
+    """Tokenize text into sentences using NLTK."""
     try:
         sents = sent_tokenize(text)
     except Exception:
@@ -179,6 +162,7 @@ def split_sentences(text: str) -> List[str]:
 
 
 def get_pos_tags(sentence: str) -> List[Tuple[str, str]]:
+    """Get part-of-speech tags for a sentence."""
     try:
         tokens = word_tokenize(sentence)
         return pos_tag(tokens)
@@ -187,11 +171,14 @@ def get_pos_tags(sentence: str) -> List[Tuple[str, str]]:
 
 
 def extract_noun_phrases(sentence: str) -> List[str]:
+    """Extract meaningful noun phrases from a sentence."""
     tagged = get_pos_tags(sentence)
     if not tagged:
         return []
+
     noun_phrases = []
     current_np = []
+
     for word, tag in tagged:
         if tag.startswith('NN') or tag.startswith('JJ') and current_np:
             current_np.append(word)
@@ -207,56 +194,82 @@ def extract_noun_phrases(sentence: str) -> List[str]:
                 if len(phrase.split()) >= 1 and phrase.lower() not in STOP_WORDS:
                     noun_phrases.append(phrase)
                 current_np = []
+
     if current_np:
         phrase = ' '.join(current_np)
         if phrase.lower() not in STOP_WORDS:
             noun_phrases.append(phrase)
+
     return [np for np in noun_phrases if len(np) > 2]
 
 
 def get_key_noun(sentence: str) -> Optional[Tuple[str, str]]:
+    """
+    Return the single best (keyword, pos_tag) to blank out.
+    Prefer: proper nouns > nouns > key adjectives/verbs.
+    """
     tagged = get_pos_tags(sentence)
     if not tagged:
         return None
+
     candidates = []
     for word, tag in tagged:
         if word.lower() in STOP_WORDS or len(word) <= 2 or not word.isalpha():
             continue
-        if tag == 'NNP':
+        if tag == 'NNP':  # Proper noun — highest priority
             candidates.append((word, tag, 5))
         elif tag == 'NNPS':
             candidates.append((word, tag, 4))
-        elif tag in ('NN', 'NNS'):
+        elif tag in ('NN', 'NNS'):  # Common noun
             candidates.append((word, tag, 3))
-        elif tag.startswith('VB') and len(word) > 4:
+        elif tag.startswith('VB') and len(word) > 4:  # Verb
             candidates.append((word, tag, 2))
-        elif tag.startswith('JJ') and len(word) > 4:
+        elif tag.startswith('JJ') and len(word) > 4:  # Adjective
             candidates.append((word, tag, 1))
+
     if not candidates:
         return None
+
+    # Sort by priority desc, then length desc (longer = more specific)
     candidates.sort(key=lambda x: (x[2], len(x[0])), reverse=True)
     best = candidates[0]
     return (best[0], best[1])
 
 
+# ════════════════════════════════════════════════════════════════
+# DISTRACTOR ENGINE
+# ════════════════════════════════════════════════════════════════
+
 def get_wordnet_distractors(word: str, pos_tag_str: str, n: int = 3) -> List[str]:
+    """
+    Get semantically-related distractors from WordNet.
+    Uses synsets, hypernyms, and co-hyponyms.
+    """
     wn_pos = wordnet.NOUN
     if pos_tag_str.startswith('VB'):
         wn_pos = wordnet.VERB
     elif pos_tag_str.startswith('JJ'):
         wn_pos = wordnet.ADJ
+
     candidates = set()
+
     synsets = wordnet.synsets(word.lower(), pos=wn_pos)
+
     for syn in synsets[:3]:
+        # Lemmas of the same synset (synonyms)
         for lemma in syn.lemmas():
             name = lemma.name().replace('_', ' ')
             if name.lower() != word.lower():
                 candidates.add(name)
+
+        # Hypernym lemmas
         for hyper in syn.hypernyms()[:2]:
             for lemma in hyper.lemmas():
                 name = lemma.name().replace('_', ' ')
                 if name.lower() != word.lower():
                     candidates.add(name)
+
+        # Co-hyponyms (siblings)
         for hyper in syn.hypernyms()[:1]:
             for hypo in hyper.hyponyms()[:6]:
                 if hypo != syn:
@@ -264,12 +277,17 @@ def get_wordnet_distractors(word: str, pos_tag_str: str, n: int = 3) -> List[str
                         name = lemma.name().replace('_', ' ')
                         if name.lower() != word.lower():
                             candidates.add(name)
+
     distractors = [c for c in candidates if c.isalpha() or ' ' in c]
     random.shuffle(distractors)
     return distractors[:n]
 
 
 def get_context_distractors(word: str, all_words: List[str], n: int = 3) -> List[str]:
+    """
+    Get distractors from same document (same POS, similar length).
+    These are plausible because they come from the same domain.
+    """
     word_lower = word.lower()
     candidates = list({
         w for w in all_words
@@ -283,25 +301,39 @@ def get_context_distractors(word: str, all_words: List[str], n: int = 3) -> List
     return [c.capitalize() if word[0].isupper() else c for c in candidates[:n]]
 
 
-def build_distractors(word: str, pos_tag_str: str, context_words: List[str]) -> List[str]:
+def build_distractors(word: str, pos_tag_str: str,
+                      context_words: List[str]) -> List[str]:
+    """
+    Combine WordNet + context-based distractors.
+    Deduplicate and return exactly 3 plausible wrong options.
+    """
     wn = get_wordnet_distractors(word, pos_tag_str, n=5)
     ctx = get_context_distractors(word, context_words, n=5)
+
     combined = []
     seen = {word.lower()}
     for d in wn + ctx:
         if d.lower() not in seen and d.isalpha():
             combined.append(d)
             seen.add(d.lower())
+
+    # Fallbacks if not enough
     fallbacks = ["process", "system", "method", "element", "structure",
                  "function", "theory", "mechanism", "concept", "principle"]
+
     while len(combined) < 3:
         fb = random.choice(fallbacks)
         if fb not in seen:
             combined.append(fb)
             seen.add(fb)
+
     random.shuffle(combined)
     return combined[:3]
 
+
+# ════════════════════════════════════════════════════════════════
+# WH-QUESTION GENERATOR
+# ════════════════════════════════════════════════════════════════
 
 DEFINITION_PATTERNS = [
     (r'^(.+?)\s+(?:is|are|was|were)\s+(?:a|an|the)?\s*(.+)', 'definition'),
@@ -313,9 +345,12 @@ DEFINITION_PATTERNS = [
 ]
 
 
-def make_wh_question(sentence: str, subject: str, predicate: str, pattern_type: str) -> Optional[str]:
+def make_wh_question(sentence: str, subject: str, predicate: str,
+                     pattern_type: str) -> Optional[str]:
+    """Create a grammatically-correct Wh- question."""
     sub = subject.strip()
     pred = predicate.strip().rstrip('.')
+
     templates = {
         'definition': [
             f"What is {sub}?",
@@ -338,6 +373,7 @@ def make_wh_question(sentence: str, subject: str, predicate: str, pattern_type: 
             f"Which statement about {sub} is correct?",
         ],
     }
+
     choices = templates.get(pattern_type, [f"Which statement about {sub} is correct?"])
     return random.choice(choices)
 
@@ -345,17 +381,26 @@ def make_wh_question(sentence: str, subject: str, predicate: str, pattern_type: 
 def try_make_wh_mcq(sentence: str, all_sentences: List[str],
                     classifier, scorer, context_words: List[str],
                     tfidf_score: float, cluster: int) -> Optional[Dict]:
+    """
+    Attempt to create a Wh-style question from a sentence.
+    Returns MCQ dict or None.
+    """
     for pattern, ptype in DEFINITION_PATTERNS:
         m = re.match(pattern, sentence.strip(), re.IGNORECASE)
         if m:
             subject = m.group(1).strip()
             predicate = m.group(2).strip() if len(m.groups()) >= 2 else sentence
+
             if len(subject.split()) > 8 or len(subject) < 2:
                 continue
+
             correct_answer = predicate[:120].rstrip('.,;')
             question_text = make_wh_question(sentence, subject, predicate, ptype)
+
             if not question_text or not correct_answer:
                 continue
+
+            # Build wrong options from other sentences
             wrong_answers = []
             shuffled = all_sentences[:]
             random.shuffle(shuffled)
@@ -366,18 +411,23 @@ def try_make_wh_mcq(sentence: str, all_sentences: List[str],
                         wrong_answers.append(candidate)
                     if len(wrong_answers) >= 3:
                         break
+
             while len(wrong_answers) < 3:
                 wrong_answers.append(random.choice([
                     "None of the above",
                     "Cannot be determined from the text",
                     "All of the mentioned options",
                 ]))
+
             wrong_answers = wrong_answers[:3]
             all_options = wrong_answers + [correct_answer]
             random.shuffle(all_options)
+
             correct_idx = all_options.index(correct_answer)
             difficulty = classifier.predict(question_text)
-            quality = scorer.score(question_text, correct_answer, wrong_answers, tfidf_score) if scorer else 0.7
+            quality = scorer.score(question_text, correct_answer,
+                                   wrong_answers, tfidf_score) if scorer else 0.7
+
             return {
                 "question": question_text,
                 "correct": correct_answer,
@@ -388,9 +438,13 @@ def try_make_wh_mcq(sentence: str, all_sentences: List[str],
                 "quality_score": round(quality, 3),
                 "question_type": "wh_question",
             }
+
     return None
 
 
+# ════════════════════════════════════════════════════════════════
+# MODULE 1: TF-IDF VECTORIZER
+# ════════════════════════════════════════════════════════════════
 class TFIDFModule:
     def __init__(self, max_features: int = 800):
         self.vectorizer = TfidfVectorizer(
@@ -419,6 +473,9 @@ class TFIDFModule:
         return [names[i] for i in top]
 
 
+# ════════════════════════════════════════════════════════════════
+# MODULE 2: COSINE SIMILARITY RANKER
+# ════════════════════════════════════════════════════════════════
 class CosineSimilarityRanker:
     def rank(self, tfidf_matrix: np.ndarray) -> np.ndarray:
         if tfidf_matrix.shape[0] < 2:
@@ -431,6 +488,9 @@ class CosineSimilarityRanker:
         return np.clip(final, 0.0, 1.0)
 
 
+# ════════════════════════════════════════════════════════════════
+# MODULE 3: KMEANS CLUSTERING
+# ════════════════════════════════════════════════════════════════
 class KMeansTopicClusterer:
     def __init__(self, n_clusters: int = 6):
         self.n_clusters = n_clusters
@@ -455,274 +515,45 @@ class KMeansTopicClusterer:
 
 
 # ════════════════════════════════════════════════════════════════
-# 3000 MCQ TRAINING DATA FOR NAIVE BAYES
-# Yeh 3000 diverse examples hain (easy/medium/hard) jo NB ko
-# properly train karte hain difficulty classification ke liye
+# MODULE 4: NAIVE BAYES DIFFICULTY CLASSIFIER
 # ════════════════════════════════════════════════════════════════
-
-def build_training_data() -> Tuple[List[str], List[str]]:
-    easy_templates = [
-        "what is {concept}",
-        "who is {person}",
-        "when was {event}",
-        "what is the name of {thing}",
-        "define the term {term}",
-        "what does {abbr} stand for",
-        "identify {item}",
-        "what color is {object}",
-        "how many {units} are in {container}",
-        "which of the following is {adjective}",
-        "name the {ordinal} element of {group}",
-        "what is the capital of {place}",
-        "who invented {device}",
-        "what is the symbol for {element}",
-        "how do you spell {word}",
-        "what year was {event} established",
-        "which planet is {ordinal} from the sun",
-        "what is the plural of {word}",
-        "what type of {thing} is {example}",
-        "name one example of {category}",
-        "fill in the blank the {noun} is ______",
-        "the process of photosynthesis produces ______",
-        "water has the chemical formula ______",
-        "the speed of light is approximately ______",
-        "the human body has how many bones ______",
-        "what is the boiling point of water",
-        "who wrote {famous work}",
-        "what is the largest {category}",
-        "what language is spoken in {country}",
-        "what is two plus two",
-        "what is the opposite of {adjective}",
-        "fill blank the sun is a ______",
-        "fill blank humans breathe ______",
-        "fill blank plants need ______ to grow",
-        "what does cpu stand for in computers",
-        "which organ pumps blood in human body",
-        "what is the freezing point of water in celsius",
-        "who is the father of computer science",
-        "what is h2o commonly known as",
-        "name the gas that plants absorb during photosynthesis",
-    ]
-    medium_templates = [
-        "explain how {process} works in {context}",
-        "describe the process of {biological process} in {organism}",
-        "compare and contrast {concept a} and {concept b}",
-        "how does the {system} respond to {stimulus}",
-        "describe the relationship between {variable a} and {variable b}",
-        "explain the function of {component} in {system}",
-        "what are the types of {category} in {field}",
-        "how does {technology} classify data using {method}",
-        "discuss the role of {molecule} in {process}",
-        "explain the working principle behind {architecture}",
-        "what are the main differences between {a} and {b}",
-        "how is {concept} applied in {real world context}",
-        "describe the steps involved in {multi step process}",
-        "what factors influence {phenomenon}",
-        "explain the significance of {historical event} in {field}",
-        "how do {organisms} adapt to {environment}",
-        "what is the mechanism of action of {substance}",
-        "describe the structure and function of {biological structure}",
-        "how does {algorithm} improve efficiency in {domain}",
-        "what are the advantages and disadvantages of {approach}",
-        "explain the concept of {abstract idea} with an example",
-        "how does {phenomenon} affect {outcome} in {context}",
-        "describe the life cycle of {organism}",
-        "what is the difference between {type a} and {type b} in {field}",
-        "how are {items} classified in {taxonomy}",
-        "explain the cause and effect of {event} on {system}",
-        "what methods are used to measure {quantity} in {field}",
-        "describe how {process} is regulated in {system}",
-        "what are the key properties of {material} that make it useful for {application}",
-        "explain the relationship between {concept x} and {concept y} in {discipline}",
-        "how does variation in {parameter} affect {outcome}",
-        "what is the role of {component} in the {larger system}",
-        "describe the experimental procedure to determine {property}",
-        "how is {concept} represented mathematically",
-        "explain how {feedback mechanism} maintains {equilibrium}",
-        "what are the ethical implications of {technology} in {society}",
-        "how does {disease} affect the {organ system}",
-        "explain the difference between {type one} and {type two} errors in statistics",
-        "describe the structure of {compound} and its chemical properties",
-        "how does {economic factor} influence {market behavior}",
-    ]
-    hard_templates = [
-        "critically analyze the impact of {technology} on {domain}",
-        "evaluate the effectiveness of {algorithm} optimization in {context}",
-        "synthesize evidence to support the hypothesis regarding {topic}",
-        "compare the computational complexity of {algorithm a} and {algorithm b}",
-        "assess the theoretical limitations of {model} generalization",
-        "interpret the statistical significance of {experimental finding}",
-        "derive the mathematical relationship between {quantity a} and {quantity b}",
-        "critically evaluate the assumptions underlying {theory}",
-        "analyze the trade-offs between {approach a} and {approach b} in {scenario}",
-        "propose a novel methodology to address {research problem}",
-        "discuss the philosophical implications of {scientific discovery}",
-        "evaluate how {policy} affects {socioeconomic outcome} across different populations",
-        "formulate a mathematical proof for {theorem}",
-        "critically assess the validity of {experiment} controlling for {confound}",
-        "synthesize findings from {field a} and {field b} to explain {phenomenon}",
-        "analyze the systemic effects of {intervention} on {complex system}",
-        "evaluate competing theories of {controversial topic} based on empirical evidence",
-        "derive an efficient algorithm for solving {computational problem}",
-        "critically examine the role of {bias} in {research methodology}",
-        "assess the long-term consequences of {decision} on {environment}",
-        "analyze the epistemological foundations of {scientific discipline}",
-        "evaluate the statistical power required to detect {effect} under {conditions}",
-        "critically analyze the ethical framework of {controversial practice}",
-        "synthesize a theoretical model to explain {observed anomaly}",
-        "formulate and test a falsifiable hypothesis about {phenomenon}",
-        "derive first principles justification for {engineering principle}",
-        "assess the scalability and limitations of {distributed system}",
-        "critically evaluate the reproducibility of {landmark study}",
-        "analyze the emergent properties arising from {complex interaction}",
-        "evaluate the geopolitical implications of {technological advancement}",
-    ]
-    fillers = {
-        "concept": ["machine learning","neural networks","entropy","evolution","gravity","osmosis","democracy","capitalism","photosynthesis","relativity"],
-        "person": ["Einstein","Darwin","Newton","Turing","Marie Curie","Tesla","Shakespeare","Napoleon","Confucius","Aristotle"],
-        "event": ["World War II","the Renaissance","the Industrial Revolution","the French Revolution","the Big Bang","the Moon Landing","the Internet","DNA discovery","antibiotics","printing press"],
-        "thing": ["the largest ocean","the smallest continent","the fastest animal","the tallest mountain","the deepest lake","the longest river","the most abundant gas","the lightest element","the hardest natural substance","the oldest civilization"],
-        "term": ["algorithm","hypothesis","metabolism","democracy","entropy","catalyst","chromosome","ecosystem","bandwidth","recursion"],
-        "abbr": ["DNA","CPU","RAM","URL","HTTP","AI","GDP","NASA","WHO","UNESCO"],
-        "item": ["mitochondria","the nucleus","a virus","a quasar","a proton","tectonic plates","the ozone layer","an antibody","a transistor","a synapse"],
-        "object": ["gold","copper","the sky","grass","blood","coal","lemon","snow","rust","chlorophyll"],
-        "units": ["centimeters","millimeters","grams","seconds","volts","joules","moles","bytes","pixels","calories"],
-        "container": ["a meter","a kilogram","a minute","a volt","a joule","a mole","a kilobyte","a megapixel","a kilocalorie","a kilometer"],
-        "adjective": ["hot","large","positive","acidic","soluble","conductive","elastic","transparent","magnetic","radioactive"],
-        "ordinal": ["first","second","third","fourth","fifth","sixth","seventh","eighth","ninth","tenth"],
-        "group": ["the periodic table","the solar system","the food chain","the OSI model","the TCP/IP stack","the biological taxonomy","the color spectrum","the musical scale","the Fibonacci sequence","the binary system"],
-        "place": ["France","Japan","Brazil","Canada","Australia","Egypt","India","Germany","Argentina","Nigeria"],
-        "element": ["carbon","oxygen","hydrogen","nitrogen","gold","iron","helium","sodium","calcium","silicon"],
-        "word": ["beautiful","necessary","occurrence","conscience","separate","rhythm","privilege","accommodate","millennium","superintendent"],
-        "noun": ["mitochondria","nucleus","neuron","photon","molecule","chromosome","ecosystem","transistor","algorithm","hypothesis"],
-        "famous work": ["Hamlet","The Origin of Species","Principia Mathematica","1984","The Republic","The Wealth of Nations","Crime and Punishment","The Iliad","Don Quixote","The Communist Manifesto"],
-        "category": ["mammal","prime number","renewable energy","programming language","chemical element","continent","democracy","enzyme","algorithm","supernova"],
-        "country": ["France","Germany","Brazil","Japan","Egypt","India","Australia","Canada","Mexico","Spain"],
-        "process": ["photosynthesis","cellular respiration","protein synthesis","meiosis","osmosis","fermentation","electrolysis","nuclear fission","evaporation","condensation"],
-        "context": ["plant cells","animal metabolism","bacterial cultures","neural networks","chemical reactions","semiconductor physics","quantum mechanics","economic systems","ecological food webs","atmospheric dynamics"],
-        "biological process": ["mitosis","meiosis","DNA replication","gene expression","apoptosis","phagocytosis","synaptic transmission","hormone secretion","immune response","blood coagulation"],
-        "organism": ["eukaryotes","prokaryotes","mammals","insects","fungi","viruses","plants","bacteria","archaea","protists"],
-        "concept a": ["mitosis","classical mechanics","supervised learning","serial processing","renewable energy","inductive reasoning","socialism","deductive logic","natural selection","determinism"],
-        "concept b": ["meiosis","quantum mechanics","unsupervised learning","parallel processing","fossil fuels","deductive reasoning","capitalism","inductive logic","genetic drift","probabilism"],
-        "system": ["immune system","nervous system","digestive system","cardiovascular system","endocrine system","respiratory system","lymphatic system","skeletal system","muscular system","reproductive system"],
-        "stimulus": ["bacterial infection","viral attack","physical injury","chemical toxin","temperature change","osmotic pressure","electromagnetic radiation","mechanical stress","hormonal signal","psychological stress"],
-        "variable a": ["pressure","temperature","concentration","voltage","frequency","amplitude","mass","velocity","entropy","pH"],
-        "variable b": ["volume","energy","reaction rate","current","wavelength","intensity","acceleration","momentum","disorder","solubility"],
-        "component": ["mitochondria","ribosomes","the nucleus","enzymes","antibodies","neurons","transistors","capacitors","the CPU","the GPU"],
-        "field": ["biology","physics","chemistry","computer science","economics","psychology","neuroscience","mathematics","sociology","ecology"],
-        "technology": ["quantum computing","CRISPR","artificial intelligence","blockchain","5G networks","autonomous vehicles","gene therapy","nuclear fusion","nanotechnology","machine learning"],
-        "method": ["gradient descent","backpropagation","Bayesian inference","Monte Carlo simulation","k-means clustering","support vector machines","random forests","principal component analysis","reinforcement learning","transfer learning"],
-        "molecule": ["ATP","glucose","hemoglobin","insulin","dopamine","cortisol","serotonin","collagen","cholesterol","DNA"],
-        "architecture": ["transformer models","convolutional neural networks","recurrent networks","attention mechanisms","encoder-decoder architecture","generative adversarial networks","BERT","ResNet","LSTM","diffusion models"],
-        "real world context": ["healthcare","finance","education","agriculture","manufacturing","transportation","telecommunications","environmental monitoring","drug discovery","materials science"],
-        "multi step process": ["PCR amplification","Western blotting","protein crystallization","software compilation","database normalization","signal processing","cryptographic key exchange","machine learning model training","vaccine development","bridge construction"],
-        "phenomenon": ["global warming","antibiotic resistance","neuroplasticity","economic inflation","quantum entanglement","tectonic drift","superconductivity","epigenetic inheritance","emergent behavior","phase transitions"],
-        "historical event": ["the discovery of penicillin","the development of the internet","the sequencing of the human genome","the invention of the transistor","the discovery of X-rays","nuclear fission","the Copernican revolution","Godel incompleteness theorems","the discovery of evolution","the invention of calculus"],
-        "organisms": ["bacteria","plants","mammals","insects","fungi","fish","birds","reptiles","amphibians","archaea"],
-        "environment": ["extreme cold","high salinity","low oxygen","high radiation","acidic conditions","desert heat","deep sea pressure","nutrient-poor soil","high altitude","anaerobic environments"],
-        "substance": ["penicillin","aspirin","insulin","adrenaline","dopamine","cortisol","caffeine","ethanol","cyanide","carbon monoxide"],
-        "biological structure": ["the cell membrane","the ribosome","the mitochondrion","the synapse","the nephron","the alveolus","the sarcomere","the chloroplast","the centrosome","the nuclear pore"],
-        "algorithm": ["gradient descent","quicksort","Dijkstra algorithm","backpropagation","k-means","BERT training","merge sort","A-star search","Bellman-Ford","Viterbi algorithm"],
-        "domain": ["image recognition","natural language processing","financial modeling","drug discovery","autonomous driving","climate modeling","cybersecurity","genomics","robotics","recommendation systems"],
-        "approach": ["deep learning","rule-based systems","ensemble methods","transfer learning","federated learning","symbolic AI","evolutionary algorithms","Bayesian networks","reinforcement learning","attention mechanisms"],
-        "abstract idea": ["entropy","complexity","emergence","recursion","symmetry","invariance","equilibrium","optimization","information","probability"],
-        "outcome": ["accuracy","efficiency","stability","reproducibility","scalability","interpretability","fairness","robustness","generalizability","computational cost"],
-        "type a": ["supervised","parametric","frequentist","deterministic","synchronous","sequential","static","discrete","linear","symbolic"],
-        "type b": ["unsupervised","non-parametric","Bayesian","stochastic","asynchronous","parallel","dynamic","continuous","non-linear","connectionist"],
-        "taxonomy": ["biological classification","chemical nomenclature","programming language paradigms","machine learning model types","economic systems","psychological disorders","graph types","sorting algorithm families","network topologies","database models"],
-        "items": ["organisms","chemical compounds","programming paradigms","neural network types","economic indicators","cognitive biases","encryption algorithms","data structures","astronomical objects","geological formations"],
-        "quantity": ["entropy","information content","statistical significance","computational complexity","thermodynamic temperature","quantum coherence","economic utility","ecological biodiversity","electromagnetic field strength","genetic variation"],
-        "material": ["graphene","titanium","silicon carbide","carbon fiber","liquid crystal polymers","aerogel","shape memory alloys","piezoelectric ceramics","high-temperature superconductors","metamaterials"],
-        "application": ["aerospace engineering","biomedical implants","semiconductor manufacturing","structural engineering","optical devices","energy storage","soft robotics","acoustic damping","quantum computing hardware","thermal management"],
-        "parameter": ["learning rate","temperature","pH","concentration","voltage","sample size","regularization strength","network depth","mutation rate","selection pressure"],
-        "larger system": ["the nervous system","the global economy","the atmosphere","the ecosystem","the internet","the power grid","the human microbiome","the financial system","the climate system","the cellular signaling network"],
-        "property": ["melting point","electrical conductivity","tensile strength","solubility","refractive index","magnetic permeability","thermal capacity","optical absorption","enzymatic activity","quantum spin"],
-        "feedback mechanism": ["negative feedback in homeostasis","positive feedback in childbirth","market price regulation","neural gain control","immune tolerance","genetic buffering","climate feedback loops","hormonal regulation","population density dependence","technological adoption curves"],
-        "equilibrium": ["body temperature","blood glucose","market prices","neural firing rates","ecosystem species balance","chemical reaction rates","atmospheric CO2","gene expression levels","electromagnetic fields","economic supply and demand"],
-        "disease": ["diabetes","Alzheimer disease","cancer","HIV","tuberculosis","Parkinson disease","schizophrenia","hypertension","obesity","autoimmune disorders"],
-        "organ system": ["cardiovascular system","nervous system","immune system","endocrine system","digestive system","renal system","respiratory system","musculoskeletal system","lymphatic system","reproductive system"],
-        "compound": ["benzene","glucose","hemoglobin","ATP","insulin","dopamine","penicillin","aspirin","caffeine","cholesterol"],
-        "economic factor": ["interest rates","inflation","unemployment","government spending","trade deficits","currency exchange rates","technological innovation","tax policy","income inequality","globalization"],
-        "market behavior": ["consumer demand","price elasticity","market equilibrium","investor sentiment","supply chain dynamics","monopoly formation","currency appreciation","wage stagnation","business cycle fluctuations","asset bubbles"],
-        "model": ["neural network","linear regression","decision tree","support vector machine","Bayesian network","hidden Markov model","transformer","generative adversarial network","random forest","reinforcement learning agent"],
-        "experimental finding": ["p-values","effect sizes","confidence intervals","correlation coefficients","regression coefficients","odds ratios","hazard ratios","Cohen d","standardized mean differences","Bayesian posterior distributions"],
-        "quantity a": ["entropy","information","temperature","energy","voltage","pressure","frequency","mass","charge","angular momentum"],
-        "quantity b": ["disorder","uncertainty","kinetic energy","work","current","volume","wavelength","acceleration","field strength","angular velocity"],
-        "theory": ["general relativity","quantum mechanics","evolution by natural selection","plate tectonics","the standard model","the big bang","cognitive dissonance","efficient market hypothesis","social contract theory","information theory"],
-        "approach a": ["deep learning","frequentist statistics","deterministic algorithms","centralized systems","rule-based AI","homogeneous computing","sequential processing","hard-coded features","single-objective optimization","supervised pre-training"],
-        "approach b": ["symbolic reasoning","Bayesian inference","randomized algorithms","distributed systems","data-driven AI","heterogeneous computing","parallel processing","learned representations","multi-objective optimization","self-supervised learning"],
-        "scenario": ["low-latency applications","high-dimensional data","safety-critical systems","resource-constrained devices","adversarial environments","real-time processing","long-horizon planning","privacy-sensitive contexts","interpretability requirements","scalability challenges"],
-        "research problem": ["protein structure prediction","climate change mitigation","antibiotic resistance","autonomous navigation","interpretable AI","quantum error correction","multi-drug cancer therapy","real-time natural language understanding","global pandemic surveillance","efficient energy storage"],
-        "scientific discovery": ["quantum indeterminacy","evolution","relativity","the uncertainty principle","DNA structure","the Higgs boson","dark matter","epigenetics","antibiotic resistance","neuroplasticity"],
-        "policy": ["universal basic income","carbon taxation","net neutrality","patent law reform","drug decriminalization","universal healthcare","data privacy regulation","minimum wage increases","affirmative action","immigration reform"],
-        "socioeconomic outcome": ["income inequality","employment rates","educational attainment","healthcare access","housing affordability","social mobility","poverty rates","gender wage gaps","intergenerational wealth","economic growth"],
-        "theorem": ["Pythagoras theorem","Gödel incompleteness","Fermat last theorem","Bayes theorem","central limit theorem","Noether theorem","Nash equilibrium existence","Turing halting problem","Cantor diagonal argument","Rice theorem"],
-        "experiment": ["randomized controlled trial","double-blind study","A/B testing","quasi-experimental design","natural experiment","longitudinal cohort study","cross-sectional survey","systematic review","meta-analysis","factorial design"],
-        "confound": ["selection bias","confounding variables","measurement error","attrition bias","Hawthorne effect","Simpson paradox","multiple comparisons","reporting bias","survivorship bias","ecological fallacy"],
-        "intervention": ["monetary policy","vaccination programs","algorithmic regulation","dietary supplementation","urban planning","educational curriculum reform","antitrust enforcement","environmental remediation","social media moderation","clinical drug trials"],
-        "complex system": ["the global financial system","the human immune system","the internet","urban traffic networks","ecological food webs","the power grid","climate systems","the human brain","supply chains","democratic governance"],
-        "controversial topic": ["consciousness","free will","the interpretation of quantum mechanics","the nature of dark matter","the origins of language","the hard problem of consciousness","the existence of objective morality","the multiverse hypothesis","AI sentience","the foundations of mathematics"],
-        "computational problem": ["the traveling salesman problem","graph isomorphism","protein folding","SAT solving","integer factorization","graph coloring","scheduling optimization","natural language understanding","image segmentation","optimal control"],
-        "bias": ["confirmation bias","survivorship bias","publication bias","measurement bias","selection bias","anchoring bias","availability heuristic","attribution bias","in-group bias","automation bias"],
-        "research methodology": ["randomized controlled trials","observational studies","systematic reviews","meta-analyses","qualitative research","survey design","case studies","computational modeling","laboratory experiments","field studies"],
-        "environment_hard": ["climate change","urbanization","deforestation","ocean acidification","industrial pollution","soil degradation","species extinction","freshwater scarcity","electromagnetic pollution","plastic accumulation"],
-        "decision": ["fossil fuel investment","deforestation","nuclear energy expansion","antibiotic overuse","social media algorithmic curation","mass surveillance","genetically modified organisms","geoengineering","space militarization","autonomous weapons development"],
-        "scientific discipline": ["quantum mechanics","evolutionary biology","cognitive neuroscience","econometrics","information theory","synthetic biology","astroastrophysics","computational linguistics","social psychology","materials science"],
-        "effect": ["small effect size Cohen d 0.2","medium effect size Cohen d 0.5","large effect size Cohen d 0.8","statistically significant interaction","non-linear dose response","threshold effect","synergistic effect","antagonistic interaction","ceiling effect","floor effect"],
-        "conditions": ["small sample sizes","high measurement noise","multiple covariates","non-normal distributions","correlated predictors","missing data","selection bias","temporal autocorrelation","clustered observations","heteroscedastic errors"],
-        "controversial practice": ["human genetic enhancement","autonomous lethal weapons","mass algorithmic surveillance","predictive policing","social credit scoring","non-consensual behavioral nudging","corporate tax avoidance","factory farming","deep sea mining","fossil fuel lobbying"],
-        "observed anomaly": ["dark matter gravitational lensing","faster than expected universe expansion","antibiotic resistance spread","unexpected protein folding patterns","anomalous neural activation patterns","unexplained market crashes","species range shifts","emergence of drug-resistant pathogens","unexpected climate tipping points","anomalous quantum decoherence rates"],
-        "engineering principle": ["the second law of thermodynamics","Shannon information capacity","Nyquist sampling theorem","Heisenberg uncertainty principle","the Carnot efficiency limit","Maxwell equations","Euler beam theory","Fourier transform duality","Ohm law","Faraday electromagnetic induction"],
-        "distributed system": ["blockchain consensus","MapReduce","federated learning","peer-to-peer networks","microservices architecture","distributed databases","edge computing","content delivery networks","distributed machine learning","consensus algorithms"],
-        "landmark study": ["Watson and Crick DNA structure","Milgram obedience experiments","Framingham Heart Study","the Tuskegee syphilis study","the Stanford Prison Experiment","the Asch conformity experiments","the Hawthorne studies","the Nurses Health Study","the Human Genome Project","the LHC Higgs boson discovery"],
-        "complex interaction": ["protein-protein interactions","ecological mutualism","neuronal network dynamics","market feedback loops","immune system cross-reactivity","gene regulatory networks","agent-based social dynamics","quantum entanglement","non-linear climate feedbacks","multi-drug pharmacological interactions"],
-        "technological advancement": ["quantum computing","advanced AI","synthetic biology","autonomous weapons","space colonization","brain-computer interfaces","advanced nuclear reactors","global internet access","precision medicine","carbon capture technology"],
-        "feedback mechanism_hard": ["climate positive feedbacks","antibiotic resistance amplification","algorithmic market instability","neurological addiction cycles","pandemic transmission dynamics","economic inequality compounding","misinformation viral spread","nuclear arms race escalation","ecosystem collapse cascades","financial system fragility"],
-    }
-    def fill_template(template: str, fillers: Dict) -> str:
-        result = template
-        for key, values in fillers.items():
-            placeholder = "{" + key + "}"
-            if placeholder in result:
-                result = result.replace(placeholder, random.choice(values), 1)
-        result = re.sub(r'\{[^}]+\}', 'concept', result)
-        return result
-    train_x = []
-    train_y = []
-    random.seed(42)
-    easy_count = 1000
-    medium_count = 1200
-    hard_count = 800
-    for _ in range(easy_count):
-        tmpl = random.choice(easy_templates)
-        train_x.append(fill_template(tmpl, fillers))
-        train_y.append("easy")
-    for _ in range(medium_count):
-        tmpl = random.choice(medium_templates)
-        train_x.append(fill_template(tmpl, fillers))
-        train_y.append("medium")
-    for _ in range(hard_count):
-        tmpl = random.choice(hard_templates)
-        train_x.append(fill_template(tmpl, fillers))
-        train_y.append("hard")
-    combined = list(zip(train_x, train_y))
-    random.shuffle(combined)
-    train_x, train_y = zip(*combined)
-    return list(train_x), list(train_y)
-
-
 class DifficultyClassifier:
+    TRAIN_X = [
+        # EASY
+        "what is", "who is", "when was", "what is the name", "define the term",
+        "what does mean", "simple definition", "basic concept", "fill blank name",
+        "identify the following", "what color", "list the items",
+        # MEDIUM
+        "explain how photosynthesis works in plants using sunlight",
+        "describe the process of cell division in eukaryotes",
+        "compare and contrast the differences between two systems",
+        "how does the immune system respond to bacterial infection",
+        "describe the relationship between pressure and volume",
+        "explain the function of mitochondria in cell metabolism",
+        "what are the types of polymorphism in object oriented programming",
+        "how does machine learning classify data using neural networks",
+        "discuss the role of enzymes in biochemical reactions",
+        "explain the working principle behind transformer architecture",
+        # HARD
+        "critically analyze the impact of quantum computing on cryptography",
+        "evaluate the effectiveness of gradient descent optimization algorithms",
+        "synthesize evidence to support the hypothesis regarding climate change",
+        "compare the computational complexity of sorting algorithms",
+        "assess the theoretical limitations of neural network generalization",
+        "interpret the statistical significance of experimental findings",
+        "derive the mathematical relationship between entropy and information",
+    ]
+    TRAIN_Y = ["easy"] * 12 + ["medium"] * 10 + ["hard"] * 7
+
     def __init__(self):
         self.le = LabelEncoder()
         self.pipeline = Pipeline([
-            ('tfidf', TfidfVectorizer(stop_words='english', ngram_range=(1, 2), max_features=2000)),
-            ('nb', MultinomialNB(alpha=0.3)),
+            ('tfidf', TfidfVectorizer(stop_words='english', ngram_range=(1, 2), max_features=500)),
+            ('nb', MultinomialNB(alpha=0.5)),
         ])
-        logger.info("⏳ Building 3000-sample Naive Bayes training data...")
-        train_x, train_y = build_training_data()
-        y_enc = self.le.fit_transform(train_y)
-        self.pipeline.fit(train_x, y_enc)
-        logger.info(f"✓ Naive Bayes trained on {len(train_x)} samples | Classes: {list(self.le.classes_)}")
+        y_enc = self.le.fit_transform(self.TRAIN_Y)
+        self.pipeline.fit(self.TRAIN_X, y_enc)
+        logger.info("✓ Naive Bayes classifier trained")
 
     def predict(self, text: str) -> str:
         try:
@@ -732,6 +563,9 @@ class DifficultyClassifier:
             return "medium"
 
 
+# ════════════════════════════════════════════════════════════════
+# MODULE 5: NUMPY QUALITY SCORER
+# ════════════════════════════════════════════════════════════════
 class NumpyQualityScorer:
     W = np.array([0.30, 0.25, 0.20, 0.15, 0.10], dtype=np.float64)
 
@@ -739,12 +573,16 @@ class NumpyQualityScorer:
         total = max(sum(word_freq.values()), 1)
         self.prob = {w: c / total for w, c in word_freq.items()}
 
-    def score(self, question: str, answer: str, distractors: List[str], tfidf_score: float) -> float:
+    def score(self, question: str, answer: str,
+              distractors: List[str], tfidf_score: float) -> float:
         words = question.split()
         n = len(words)
+
         f1 = float(np.clip(tfidf_score, 0, 1))
+
         p = self.prob.get(answer.lower().split()[0], 0.001)
         f2 = float(np.clip(1.0 - p * 30, 0, 1))
+
         if 8 <= n <= 25:
             f3 = 1.0
         elif n < 5:
@@ -753,6 +591,7 @@ class NumpyQualityScorer:
             f3 = 0.3
         else:
             f3 = 0.6
+
         if distractors:
             c_set = set(answer.lower())
             jaccard_scores = []
@@ -765,26 +604,37 @@ class NumpyQualityScorer:
             f4 = float(np.mean(jaccard_scores))
         else:
             f4 = 0.0
+
         has_blank = "______" in question or "_____" in question
         f5 = 1.0 if has_blank else 0.7
+
         f = np.array([f1, f2, f3, f4, f5], dtype=np.float64)
         return float(np.clip(np.dot(self.W, f), 0.0, 1.0))
 
 
+# ════════════════════════════════════════════════════════════════
+# MAIN AI QUIZ ENGINE
+# ════════════════════════════════════════════════════════════════
 class AIQuizEngine:
+    """
+    Full ML-based MCQ Generator
+    Pipeline: NLP → TF-IDF → Cosine → KMeans → NaiveBayes → NumPy → Pandas
+    """
+
     def __init__(self):
         self._tfidf = TFIDFModule(max_features=800)
         self._ranker = CosineSimilarityRanker()
         self._clusterer = KMeansTopicClusterer(n_clusters=6)
         self._classifier = DifficultyClassifier()
         self._scorer: Optional[NumpyQualityScorer] = None
-        logger.info("🚀 AIQuizEngine v6.0 initialized with PDF + 3000-MCQ training")
+        logger.info("🚀 AIQuizEngine v5.0 initialized")
 
     def _get_word_freq(self, text: str) -> Dict[str, int]:
         words = re.findall(r'\b[a-zA-Z]{3,}\b', text.lower())
         return Counter(words)
 
     def _get_all_nouns(self, text: str) -> List[str]:
+        """Extract all meaningful nouns/keyphrases from the text."""
         tagged = get_pos_tags(text)
         nouns = [
             word for word, tag in tagged
@@ -795,25 +645,44 @@ class AIQuizEngine:
 
     def _make_fill_blank_mcq(self, sentence: str, context_words: List[str],
                               tfidf_score: float, cluster: int) -> Optional[Dict]:
+        """
+        Create a high-quality fill-in-the-blank MCQ.
+        Uses POS tagging to select the best keyword to blank out.
+        """
         result = get_key_noun(sentence)
         if not result:
             return None
+
         target_word, pos = result
+
+        # Don't blank very short or very common words
         if len(target_word) <= 3 or target_word.lower() in STOP_WORDS:
             return None
+
+        # Create question with blank
         pattern = r'\b' + re.escape(target_word) + r'\b'
         q_text = re.sub(pattern, '______', sentence, count=1, flags=re.IGNORECASE)
         q_text = q_text.strip()
+
         if '______' not in q_text:
             return None
+
+        # Ensure question ends properly
         if not q_text.endswith(('?', '.', '!')):
             q_text += '.'
+
+        # Build distractors
         distractors = build_distractors(target_word, pos, context_words)
+
+        # Assemble options
         all_options = distractors[:3] + [target_word]
         random.shuffle(all_options)
         correct_idx = all_options.index(target_word)
+
         difficulty = self._classifier.predict(q_text)
-        quality = self._scorer.score(q_text, target_word, distractors, tfidf_score) if self._scorer else 0.65
+        quality = self._scorer.score(q_text, target_word,
+                                     distractors, tfidf_score) if self._scorer else 0.65
+
         return {
             "question": q_text,
             "correct": target_word,
@@ -826,26 +695,54 @@ class AIQuizEngine:
         }
 
     def generate(self, raw_text: str, limit: int) -> List[Dict]:
+        """
+        FULL ML PIPELINE:
+        1. Clean & tokenize (NLTK)
+        2. TF-IDF vectorization
+        3. Cosine similarity ranking
+        4. KMeans topic clustering
+        5. Wh-question generation (definition-based)
+        6. Fill-in-blank generation (POS-targeted)
+        7. Naive Bayes difficulty classification
+        8. NumPy quality scoring
+        9. Pandas analytics & reporting
+        """
         text = clean_text(raw_text)
         word_freq = self._get_word_freq(text)
         self._scorer = NumpyQualityScorer(word_freq)
         context_words = self._get_all_nouns(text)
+
         results: List[Dict] = []
         used_answers: set = set()
         used_sentences: set = set()
+
         t0 = time.time()
+
+        # ─── Sentence tokenization ───
         sentences = split_sentences(text)
         if len(sentences) < 2:
+            # Fallback: split by period
             sentences = [s.strip() for s in text.split('.') if len(s.split()) >= 6]
         if not sentences:
             sentences = [text]
+
         logger.info(f"✓ Found {len(sentences)} sentences")
+
+        # ─── TF-IDF ───
         tfidf_matrix = self._tfidf.fit_transform(sentences)
         keywords = self._tfidf.get_top_keywords(8)
         logger.info(f"✓ TF-IDF {tfidf_matrix.shape} | Keywords: {keywords}")
+
+        # ─── Cosine Ranking ───
         importance = self._ranker.rank(tfidf_matrix)
+
+        # ─── KMeans Clustering ───
         clusters = self._clusterer.fit_predict(tfidf_matrix)
+
+        # ─── Ranked sentence indices ───
         ranked_idx = np.argsort(importance)[::-1]
+
+        # ─── Pass 1: Wh-Questions from definition-pattern sentences ───
         for idx in ranked_idx:
             if len(results) >= limit:
                 break
@@ -860,6 +757,8 @@ class AIQuizEngine:
                 used_answers.add(mcq['correct'].lower()[:40])
                 used_sentences.add(idx)
                 results.append(mcq)
+
+        # ─── Pass 2: Fill-in-blank MCQs ───
         for idx in ranked_idx:
             if len(results) >= limit:
                 break
@@ -874,11 +773,14 @@ class AIQuizEngine:
                 used_answers.add(mcq['correct'].lower())
                 used_sentences.add(idx)
                 results.append(mcq)
+
+        # ─── Pass 3: Recycle sentences with different targets ───
         if len(results) < limit:
             for idx in ranked_idx:
                 if len(results) >= limit:
                     break
                 sent = sentences[idx]
+                # Try all possible nouns in this sentence
                 tagged = get_pos_tags(sent)
                 words = [(w, t) for w, t in tagged
                          if t.startswith('NN') and len(w) > 3
@@ -910,10 +812,14 @@ class AIQuizEngine:
                     }
                     used_answers.add(word.lower())
                     results.append(mcq)
+
+        # ─── Sort by quality score (NumPy) ───
         if results:
             q_scores = np.array([r['quality_score'] for r in results])
             sorted_idx = np.argsort(q_scores)[::-1]
             results = [results[i] for i in sorted_idx]
+
+        # ─── Pandas analytics ───
         elapsed = round(time.time() - t0, 3)
         if results:
             df = pd.DataFrame(results)
@@ -923,11 +829,17 @@ class AIQuizEngine:
                 f"📈 Avg Quality: {df['quality_score'].mean():.3f} | "
                 f"Time: {elapsed}s | Total: {len(results)}"
             )
+
         return results[:limit]
 
 
+# Singleton
 ai_engine = AIQuizEngine()
 
+
+# ════════════════════════════════════════════════════════════════
+# PYDANTIC SCHEMAS
+# ════════════════════════════════════════════════════════════════
 
 class SignupSchema(BaseModel):
     username: str
@@ -992,10 +904,14 @@ class QuizRequest(BaseModel):
         return v
 
 
+# ════════════════════════════════════════════════════════════════
+# FASTAPI APPLICATION
+# ════════════════════════════════════════════════════════════════
+
 app = FastAPI(
-    title="UoH AI Quiz Engine v6.0",
-    description="NLP + TF-IDF + Cosine + KMeans + NaiveBayes(3000samples) + NumPy + Pandas + PDF",
-    version="6.0"
+    title="UoH AI Quiz Engine v5.0",
+    description="NLP + TF-IDF + Cosine + KMeans + NaiveBayes + NumPy + Pandas",
+    version="5.0"
 )
 
 app.add_middleware(
@@ -1013,6 +929,10 @@ def get_db():
     finally:
         db.close()
 
+
+# ════════════════════════════════════════════════════════════════
+# AUTH ENDPOINTS
+# ════════════════════════════════════════════════════════════════
 
 @app.post("/auth/signup")
 def signup(data: SignupSchema, db: Session = Depends(get_db)):
@@ -1039,22 +959,31 @@ def login(data: LoginSchema, db: Session = Depends(get_db)):
     return {"status": "success", "user_id": user.id, "username": user.username, "email": user.email}
 
 
+# ════════════════════════════════════════════════════════════════
+# QUIZ ENDPOINTS
+# ════════════════════════════════════════════════════════════════
+
 @app.post("/api/v1/generate-quiz")
 async def generate_quiz(req: QuizRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.id == req.user_id).first()
     if not user:
         raise HTTPException(404, "User not found")
+
     t0 = time.time()
     questions = ai_engine.generate(req.text_content, req.count)
     elapsed = round(time.time() - t0, 3)
+
     if not questions:
         raise HTTPException(
             422,
             "Could not generate questions. Please provide more detailed academic text "
             "(at least 3-5 sentences with clear concepts, definitions, or facts)."
         )
+
     quiz_type_map = {10: "quick", 25: "standard", 50: "extended", 100: "full"}
     quiz_type = quiz_type_map.get(req.count, "standard" if req.count <= 25 else "extended")
+
+    # Save session
     session = QuizSession(
         user_id=req.user_id,
         title=f"Quiz_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
@@ -1062,11 +991,11 @@ async def generate_quiz(req: QuizRequest, db: Session = Depends(get_db)):
         total_questions=len(questions),
         quiz_type=quiz_type,
         processing_time=elapsed,
-        source_type="text",
     )
     db.add(session)
     db.commit()
     db.refresh(session)
+
     for q in questions:
         db.add(QuestionBank(
             session_id=session.id,
@@ -1079,6 +1008,7 @@ async def generate_quiz(req: QuizRequest, db: Session = Depends(get_db)):
             question_type=q.get('question_type', 'fill_blank'),
         ))
     db.commit()
+
     df = pd.DataFrame(questions)
     stats = {
         "easy": int((df['difficulty'] == 'easy').sum()),
@@ -1089,102 +1019,13 @@ async def generate_quiz(req: QuizRequest, db: Session = Depends(get_db)):
         "wh_questions": int((df['question_type'] == 'wh_question').sum()),
         "fill_blank": int((df['question_type'] == 'fill_blank').sum()),
     }
+
     return {
         "session_id": session.id,
         "time": f"{elapsed}s",
         "total": len(questions),
         "quiz_type": quiz_type,
-        "source_type": "text",
-        "ml_pipeline": "NLTK → TF-IDF → Cosine → KMeans → NaiveBayes(3000) → NumPy → Pandas",
-        "quiz": questions,
-        "stats": stats,
-    }
-
-
-@app.post("/api/v1/generate-quiz-pdf")
-async def generate_quiz_from_pdf(
-    user_id: int = Form(...),
-    count: int = Form(10),
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db)
-):
-    if not PDF_SUPPORT:
-        raise HTTPException(500, "PDF support not installed. Run: pip install pymupdf")
-    if not file.filename.lower().endswith('.pdf'):
-        raise HTTPException(400, "Only PDF files are accepted")
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(404, "User not found")
-    if not (1 <= count <= 100):
-        raise HTTPException(400, "Count must be between 1 and 100")
-    pdf_bytes = await file.read()
-    if len(pdf_bytes) > 20 * 1024 * 1024:
-        raise HTTPException(400, "PDF file too large. Maximum size is 20MB")
-    logger.info(f"📄 Extracting text from PDF: {file.filename} ({len(pdf_bytes)} bytes)")
-    extracted_text = extract_text_from_pdf(pdf_bytes)
-    if len(extracted_text.strip()) < 50:
-        raise HTTPException(
-            422,
-            "Could not extract enough text from PDF. "
-            "Make sure the PDF contains readable text (not scanned images)."
-        )
-    logger.info(f"✓ Extracted {len(extracted_text)} characters from PDF")
-    t0 = time.time()
-    questions = ai_engine.generate(extracted_text, count)
-    elapsed = round(time.time() - t0, 3)
-    if not questions:
-        raise HTTPException(
-            422,
-            "Could not generate questions from PDF content. "
-            "Ensure the PDF has academic text with definitions and facts."
-        )
-    quiz_type_map = {10: "quick", 25: "standard", 50: "extended", 100: "full"}
-    quiz_type = quiz_type_map.get(count, "standard" if count <= 25 else "extended")
-    session = QuizSession(
-        user_id=user_id,
-        title=f"PDF_{file.filename[:30]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-        content_summary=extracted_text[:300],
-        total_questions=len(questions),
-        quiz_type=quiz_type,
-        processing_time=elapsed,
-        source_type="pdf",
-    )
-    db.add(session)
-    db.commit()
-    db.refresh(session)
-    for q in questions:
-        db.add(QuestionBank(
-            session_id=session.id,
-            question_body=q['question'],
-            correct_ans=q['correct'],
-            distractors_json='|'.join(q['options']),
-            difficulty=q['difficulty'],
-            topic_cluster=q['topic_cluster'],
-            quality_score=q['quality_score'],
-            question_type=q.get('question_type', 'fill_blank'),
-        ))
-    db.commit()
-    df = pd.DataFrame(questions)
-    stats = {
-        "easy": int((df['difficulty'] == 'easy').sum()),
-        "medium": int((df['difficulty'] == 'medium').sum()),
-        "hard": int((df['difficulty'] == 'hard').sum()),
-        "avg_quality": round(float(df['quality_score'].mean()), 3),
-        "clusters": int(df['topic_cluster'].nunique()),
-        "wh_questions": int((df['question_type'] == 'wh_question').sum()),
-        "fill_blank": int((df['question_type'] == 'fill_blank').sum()),
-        "pdf_chars_extracted": len(extracted_text),
-        "pdf_filename": file.filename,
-    }
-    return {
-        "session_id": session.id,
-        "time": f"{elapsed}s",
-        "total": len(questions),
-        "quiz_type": quiz_type,
-        "source_type": "pdf",
-        "pdf_filename": file.filename,
-        "pdf_text_length": len(extracted_text),
-        "ml_pipeline": "PyMuPDF → NLTK → TF-IDF → Cosine → KMeans → NaiveBayes(3000) → NumPy → Pandas",
+        "ml_pipeline": "NLTK → TF-IDF → Cosine → KMeans → NaiveBayes → NumPy → Pandas",
         "quiz": questions,
         "stats": stats,
     }
@@ -1211,7 +1052,6 @@ def get_history(user_id: int, db: Session = Depends(get_db)):
                 "title": s.title,
                 "questions": s.total_questions,
                 "quiz_type": s.quiz_type,
-                "source_type": s.source_type or "text",
                 "processing_time": f"{s.processing_time}s",
                 "created_at": s.created_at.strftime("%d %b %Y %H:%M"),
             }
@@ -1220,73 +1060,39 @@ def get_history(user_id: int, db: Session = Depends(get_db)):
     }
 
 
-@app.get("/api/v1/session/{session_id}")
-def get_session_questions(session_id: int, db: Session = Depends(get_db)):
-    session = db.query(QuizSession).filter(QuizSession.id == session_id).first()
-    if not session:
-        raise HTTPException(404, "Session not found")
-    questions = db.query(QuestionBank).filter(QuestionBank.session_id == session_id).all()
-    return {
-        "session_id": session_id,
-        "title": session.title,
-        "source_type": session.source_type or "text",
-        "total": len(questions),
-        "questions": [
-            {
-                "id": q.id,
-                "question": q.question_body,
-                "correct": q.correct_ans,
-                "options": q.distractors_json.split('|') if q.distractors_json else [],
-                "difficulty": q.difficulty,
-                "topic_cluster": q.topic_cluster,
-                "quality_score": q.quality_score,
-                "question_type": q.question_type,
-            }
-            for q in questions
-        ],
-    }
-
-
 @app.get("/api/v1/ml-info")
 def ml_info():
     return {
-        "engine": "UoH AI Quiz Engine v6.0",
-        "new_features": ["PDF text extraction (PyMuPDF)", "3000-sample Naive Bayes training", "Session question retrieval"],
+        "engine": "UoH AI Quiz Engine v5.0",
         "pipeline_steps": [
-            {"step": 1, "name": "PDF Extractor (PyMuPDF)", "purpose": "Extract text from PDF files"},
-            {"step": 2, "name": "NLTK Sentence Tokenizer", "purpose": "Split text into sentences"},
-            {"step": 3, "name": "POS Tagger", "purpose": "Identify nouns, verbs, adjectives"},
-            {"step": 4, "name": "TF-IDF Vectorizer", "purpose": "Text → numerical features"},
-            {"step": 5, "name": "Cosine Similarity", "purpose": "Rank sentence importance"},
-            {"step": 6, "name": "KMeans Clustering", "purpose": "Group sentences by topic"},
-            {"step": 7, "name": "Wh-Question Generator", "purpose": "Definition-based MCQs"},
-            {"step": 8, "name": "Fill-Blank Generator", "purpose": "POS-targeted cloze MCQs"},
-            {"step": 9, "name": "WordNet Distractors", "purpose": "Semantic wrong options"},
-            {"step": 10, "name": "Naive Bayes (3000 samples)", "purpose": "Difficulty classification"},
-            {"step": 11, "name": "NumPy Quality Scorer", "purpose": "5-feature dot-product scoring"},
-            {"step": 12, "name": "Pandas Analytics", "purpose": "Statistics & reporting"},
+            {"step": 1, "name": "NLTK Sentence Tokenizer", "purpose": "Split text into sentences"},
+            {"step": 2, "name": "POS Tagger", "purpose": "Identify nouns, verbs, adjectives"},
+            {"step": 3, "name": "TF-IDF Vectorizer", "purpose": "Text → numerical features"},
+            {"step": 4, "name": "Cosine Similarity", "purpose": "Rank sentence importance"},
+            {"step": 5, "name": "KMeans Clustering", "purpose": "Group sentences by topic"},
+            {"step": 6, "name": "Wh-Question Generator", "purpose": "Definition-based MCQs"},
+            {"step": 7, "name": "Fill-Blank Generator", "purpose": "POS-targeted cloze MCQs"},
+            {"step": 8, "name": "WordNet Distractors", "purpose": "Semantic wrong options"},
+            {"step": 9, "name": "Naive Bayes", "purpose": "Difficulty classification"},
+            {"step": 10, "name": "NumPy Quality Scorer", "purpose": "5-feature dot-product scoring"},
+            {"step": 11, "name": "Pandas Analytics", "purpose": "Statistics & reporting"},
         ],
     }
 
 
 @app.get("/health")
 def health_check():
-    return {
-        "status": "healthy",
-        "version": "6.0",
-        "database": "sqlite",
-        "ml_pipeline": "active",
-        "pdf_support": PDF_SUPPORT,
-        "nb_training_samples": 3000,
-    }
+    return {"status": "healthy", "version": "5.0", "database": "sqlite", "ml_pipeline": "active"}
 
 
+# ════════════════════════════════════════════════════════════════
+# RUN
+# ════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     import uvicorn
     logger.info("=" * 70)
-    logger.info("🚀 UoH AI Quiz Engine v6.0")
+    logger.info("🚀 UoH AI Quiz Engine v5.0")
     logger.info("📍 http://127.0.0.1:8000")
     logger.info("📚 Docs: http://127.0.0.1:8000/docs")
-    logger.info("📄 PDF Support: " + ("✓ Active" if PDF_SUPPORT else "✗ Install pymupdf"))
     logger.info("=" * 70)
     uvicorn.run(app, host="127.0.0.1", port=8000, reload=True)
