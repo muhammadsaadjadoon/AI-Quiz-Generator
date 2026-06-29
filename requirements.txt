@@ -1,0 +1,11 @@
+fastapi>=0.115.0
+uvicorn>=0.34.0
+sqlalchemy>=2.0.0
+werkzeug>=3.0.0
+pydantic>=2.8.0
+numpy>=2.0.0
+pandas>=2.2.0
+scikit-learn>=1.5.0
+nltk>=3.9.0
+PyMuPDF>=1.24.0
+python-multipart>=0.0.9
