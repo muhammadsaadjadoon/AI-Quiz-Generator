@@ -1,0 +1,25 @@
+# ── Web framework ──
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.6
+python-multipart>=0.0.9
+
+# ── Database / auth ──
+sqlalchemy>=2.0.35
+werkzeug>=3.0.4
+pydantic>=2.9.2
+
+# ── Deep learning core ──
+torch>=2.6.0
+transformers>=4.44.2
+sentence-transformers>=3.1.1
+
+# ── Classical ML / numerical ──
+scikit-learn>=1.5.2
+numpy>=1.26.4
+pandas>=2.2.3
+
+# ── NLP support (POS tagging, WordNet for distractors) ──
+nltk>=3.9.1
+
+# ── PDF text extraction ──
+pymupdf>=1.24.10
