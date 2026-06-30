@@ -16,7 +16,7 @@ Automatically generate high-quality Multiple Choice Questions (MCQs) from educat
 
 The AI Quiz Generator has been successfully deployed on **Render** and is publicly accessible through the following link.
 
-🔗 **Live Application:** https://your-render-link.onrender.com
+🔗 **Live Application:** https://ai-quiz-generator-l65r.onrender.com/
 
 </div>
 
