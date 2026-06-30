@@ -12,6 +12,12 @@
 
 Automatically generate high-quality Multiple Choice Questions (MCQs) from educational content using Natural Language Processing, Transformer Models, Semantic Search, and Machine Learning.
 
+## 🌐 Live Demo
+
+The AI Quiz Generator has been successfully deployed on **Render** and is publicly accessible through the following link.
+
+🔗 **Live Application:** https://your-render-link.onrender.com
+
 </div>
 
 ---
